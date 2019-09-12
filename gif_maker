@@ -1,0 +1,14 @@
+import imageio
+import matplotlib.pyplot as plt
+import os
+import glob
+
+AWGN_PATH = './intermediate/'
+awgn_images = []
+
+files = glob.glob(AWGN_PATH + '*.png')
+files = sorted(files)
+print(files)
+for filename in files:
+    awgn_images.append(imageio.imread(filename))
+imageio.mimsave('./results/gifs/awgn.gif', awgn_images)
