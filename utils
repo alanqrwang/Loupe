@@ -1,9 +1,0 @@
-import matplotlib.pyplot as plt
-
-def plot_figure(x, filename)                
-fig = plt.figure()
-                plt.imshow(mask.detach().cpu().numpy())
-                plt.colorbar()
-                plt.savefig('./intermediate/fig_%s_%s.png' % (str(epoch).zfill(4), str(batch_idx).zfill(4)))
-                plt.close()
-                fig.clf()
