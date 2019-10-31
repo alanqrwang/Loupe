@@ -7,7 +7,7 @@ import pickle
 import sys
 import os
 import glob
-import parse
+# import parse
 from pylab import subplot
 
 parser = ArgumentParser(description='Mask Visualizer')
@@ -75,39 +75,26 @@ fig = plt.figure(figsize=[args.w, args.h])
 ax = plt.gca()
 v = 0
 
-print('loading data...')
-xdata = np.load(args.data_path, mmap_mode='r')
-print('done')
+# print('loading data...')
+# xdata = np.load(args.data_path, mmap_mode='r')
+# print('done')
 for i, path in enumerate(filepaths):
-    parsed = parse.parse(format_string, path)
+    # parsed = parse.parse(format_string, path)
 
-    model = loupe_pytorch.model.Loupe((xdata.shape[1], xdata.shape[2], xdata.shape[3]), \
-        pmask_slope=float(parsed['pmask_slope']), sample_slope=float(parsed['sample_slope']),\
-        sparsity=float(parsed['sparsity']), device='cuda')
-
-    if path.endswith('txt'):
-        losses = np.loadtxt(path)
-        color = next(ax._get_lines.prop_cycler)['color']
-        plt.plot(losses, label='Train loss, mode=%s' % (tmp[i]), color=color)
-        plt.grid()
-        plt.xlabel('Epoch')
-        plt.legend(loc='upper right')
-        plt.title('%s for knee, lr = %s, pmask_slope = %s, sample_slope = %s' \
-            % (to_visualize, parsed['lr'], parsed['pmask_slope'], parsed['sample_slope']))
-        plt.ylim([0, 0.02])
+    # model = loupe_pytorch.model.Loupe((xdata.shape[1], xdata.shape[2], xdata.shape[3]), \
+    #     pmask_slope=float(parsed['pmask_slope']), sample_slope=float(parsed['sample_slope']),\
+    #     sparsity=float(parsed['sparsity']), device='cuda')
 
     # Loss
-    elif path.endswith('.pkl'):
+    if path.endswith('.pkl'):
         f = open(path, 'rb') 
         losses = pickle.load(f)
         color = next(ax._get_lines.prop_cycler)['color']
-        plt.plot(losses['loss'], label='Train loss, loss = %s, sparsity = %s' % (parsed['loss'], parsed['sparsity']), color=color)
-        plt.plot(losses['val_loss'], label='Val loss, loss = %s, sparsity = %s' % (parsed['loss'], parsed['sparsity']), color=color, linestyle='dashed')
+        plt.plot(losses['loss'], label='Train loss') #, loss = %s, sparsity = %s' % (parsed['loss'], parsed['sparsity']), color=color)
+        plt.plot(losses['val_loss'], label='Val loss') #, loss = %s, sparsity = %s' % (parsed['loss'], parsed['sparsity']), color=color, linestyle='dashed')
         plt.grid()
         plt.xlabel('Epoch')
         plt.legend(loc='upper right')
-        plt.title('%s for knee, lr = %s, pmask_slope = %s, sample_slope = %s' \
-            % (to_visualize, parsed['lr'], parsed['pmask_slope'], parsed['sample_slope']))
         plt.ylim([0, 0.1])
 
     # Mask
