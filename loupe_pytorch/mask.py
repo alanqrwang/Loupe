@@ -2,41 +2,120 @@ import torch
 import torch.nn as nn
 
 class Mask(nn.Module):
-    def __init__(self, image_dims, pmask_slope, sample_slope, sparsity, device, eps=0.01, slope=10):
+    def __init__(self, image_dims, pmask_slope, sample_slope, sparsity, device, straight_through_mode, eps=0.01):
         super(Mask, self).__init__()
+        
         self.image_dims = image_dims
-        self.sparsity = sparsity
-        self.device = device
         self.pmask_slope = pmask_slope
         self.sample_slope = sample_slope
-
-        self.weight = nn.Parameter(torch.FloatTensor(image_dims[0], image_dims[1], 2)) # Mask is same dimension as image plus complex domain
-        self.weight.requires_grad = True
-        self.weight.data.uniform_(eps, 1-eps)
-        self.weight.data = -torch.log(1. / self.weight.data - 1.) / self.pmask_slope
-        self.weight.data = self.weight.data.to(self.device)
-
-    def sparsify(self, pmask):
-        xbar = pmask.mean()
+        self.device = device
+        self.sparsity = sparsity
+        assert straight_through_mode in ['ste-identity', 'ste-sigmoid-fixed', 'ste-sigmoid-anneal', 'relax'], \
+                       'mode should be ste-identity, ste-sigmoid-fixed, ste-sigmoid-anneal, relax'
+        self.straight_through_mode = straight_through_mode
+        
+        # MaskNet
+        # Mask is same dimension as image
+        self.pmask = nn.Parameter(torch.FloatTensor(self.image_dims[0], self.image_dims[1]))         
+        self.pmask.requires_grad = True
+        self.pmask.data.uniform_(eps, 1-eps)
+        self.pmask.data = -torch.log(1. / self.pmask.data - 1.) / self.pmask_slope
+        self.pmask.data = self.pmask.data.to(self.device)
+        
+    def squash_mask(self, mask):
+        return torch.sigmoid(self.pmask_slope*mask)
+    
+    def sparsify(self, mask):
+        xbar = mask.mean()
         r = self.sparsity / xbar
         beta = (1-self.sparsity) / (1-xbar)
         le = (r <= 1).float()
-        sparse_pmask = le * pmask * r + (1-le) * (1 - (1 - pmask) * beta) 
-        return sparse_pmask
+        return le * mask * r + (1-le) * (1 - (1 - mask) * beta)
 
-    def threshold(self, sparse_pmask):
-        random_uniform = torch.empty(*self.image_dims, 2).uniform_(0, 1).to(self.device)
-        return torch.sigmoid(self.sample_slope*(sparse_pmask - random_uniform))
+    def threshold(self, mask):
+        random_uniform = torch.empty(*mask.shape).uniform_(0, 1).to(self.device)
+        return torch.sigmoid(self.sample_slope*(mask - random_uniform))
+    
+    def forward(self, epoch=0, tot_epochs=0):
+        print('IN MASK')
+        # Apply probabilistic mask
+        probmask = self.squash_mask(self.pmask)
+        # Sparsify
+        sparse_mask = self.sparsify(probmask)
+        # Threshold
+        if self.straight_through_mode == 'ste-identity':
+            stidentity = straight_through_sample.STIdentity.apply
+            mask = stidentity(sparse_mask)
+        elif self.straight_through_mode == 'ste-sigmoid':
+            stsigmoid = straight_through_sample.STSigmoid.apply
+            mask = stsigmoid(sparse_mask, epoch, tot_epochs)
+        else:
+            mask = self.threshold(sparse_mask)
+        return mask
 
-    def undersample(self, x, prob_mask):
-        mask = prob_mask.expand(x.shape[0], -1, -1, -1)
-        x[:,:,:,0] = torch.mul(x[:,:,:,0], mask[:,:,:,0])
-        x[:,:,:,1] = torch.mul(x[:,:,:,1], mask[:,:,:,0])
-        return x
-
+class LocalConnected2d(nn.Module):
+    def __init__(self, in_features):
+        super(LocalConnected2d, self).__init__()
+        self.weights = nn.Parameter(torch.FloatTensor(in_features)) 
+        self.biases = nn.Parameter(torch.FloatTensor(in_features))
+        
     def forward(self, x):
-        pmask = torch.sigmoid(self.pmask_slope*self.weight.data)
-        sparse_pmask = self.sparsify(pmask)
-        threshold_mask = self.threshold(sparse_pmask)
-        x = self.undersample(x, threshold_mask)
-        return x
+        return x * self.weights + self.biases
+
+class CondMask(nn.Module):
+    def __init__(self, image_dims, pmask_slope, sample_slope, sparsity, device, straight_through_mode, eps=0.01):
+        super(CondMask, self).__init__()
+        
+        self.image_dims = image_dims
+        self.pmask_slope = pmask_slope
+        self.sample_slope = sample_slope
+        self.device = device
+        self.sparsity = sparsity
+        assert straight_through_mode in ['ste-identity', 'ste-sigmoid-fixed', 'ste-sigmoid-anneal', 'relax'], \
+                       'mode should be ste-identity, ste-sigmoid-fixed, ste-sigmoid-anneal, relax'
+        self.straight_through_mode = straight_through_mode
+        
+        # MaskNet
+        self.fc1 = nn.Linear(1, self.image_dims[0]*self.image_dims[1])
+        # self.fc2 = nn.Linear(self.image_dims[0]*self.image_dims[1], self.image_dims[0]*self.image_dims[1])
+        self.relu = nn.ReLU()
+        self.local1 = LocalConnected2d(self.image_dims[0]*self.image_dims[1])
+        # self.local2 = LocalConnected2d(self.image_dims[0]*self.image_dims[1])
+
+    def squash_mask(self, mask):
+        return torch.sigmoid(self.pmask_slope*mask)
+    
+    def sparsify(self, mask):
+        mask_out = torch.zeros_like(mask)
+        xbar = mask.mean(-1).mean(-1)
+        r = self.sparsity / xbar
+        r = r.view(-1, 1, 1)
+        beta = (1-self.sparsity) / (1-xbar)
+        beta = beta.view(-1, 1, 1)
+        le = (r <= 1).float()
+        return le * mask * r + (1-le) * (1 - (1 - mask) * beta)
+
+    def threshold(self, mask):
+        random_uniform = torch.empty_like(mask).uniform_(0, 1).to(self.device)
+        return torch.sigmoid(self.sample_slope*(mask - random_uniform))
+    
+    def forward(self, condition, epoch=0, tot_epochs=0):
+        print('IN Cond MASK')
+        fc_out = self.relu(self.fc1(condition))
+        probmask = self.local1(fc_out)
+
+        probmask = probmask.view(len(probmask), self.image_dims[0], self.image_dims[1])
+        # Apply probabilistic mask
+        probmask = self.squash_mask(probmask)
+        # Sparsify
+        sparse_mask = self.sparsify(probmask)
+        # Threshold
+        if self.straight_through_mode == 'ste-identity':
+            stidentity = straight_through_sample.STIdentity.apply
+            mask = stidentity(sparse_mask)
+        elif self.straight_through_mode == 'ste-sigmoid':
+            stsigmoid = straight_through_sample.STSigmoid.apply
+            mask = stsigmoid(sparse_mask, epoch, tot_epochs)
+        else:
+            mask = self.threshold(sparse_mask)
+        return mask
