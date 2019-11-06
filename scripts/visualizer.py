@@ -21,9 +21,6 @@ parser.add_argument('-o', '--out_name', default='vis_mask_out', type=str, help='
 parser.add_argument('--out_dir', default='../figs/', type=str, help='directory to save models')
 parser.add_argument('--gpu_id', default=0, type=int, metavar='N', help='gpu id to train on')
 parser.add_argument('--data_path', default='/nfs02/data/processed_nyu/NYU_training_Biograph.npy', type=str, help='path to data')
-parser.add_argument('--is_conditional', dest='is_conditional', action='store_true')
-parser.add_argument('--not_is_conditional', dest='is_conditional', action='store_false')
-parser.set_defaults(is_conditional=True)
 
 
 args = parser.parse_args()
@@ -35,7 +32,7 @@ else:
     args.device = torch.device('cpu')
 os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
 
-parameter_dict = {'mode':'*', 'is_conditional':'*', 'loss':'*', 'pmask_slope': '*', 'sample_slope': '*', 'sparsity': '*', 'lr': '*'}
+parameter_dict = {'mode':'*', 'loss':'*', 'pmask_slope': '*', 'sample_slope': '*', 'sparsity': '*', 'lr': '*'}
 
 for param in parameter_dict.keys():
     inp = input('Value of %s: ' % (param))
@@ -46,19 +43,16 @@ for param in parameter_dict.keys():
 
 to_visualize = input("loss, mask, or slice? l/m/s ") 
 if to_visualize == 'l':
-    format_string = '%s%s_{mode}_{is_conditional}_{loss}_{pmask_slope}_{sample_slope}_{sparsity}_{lr}/losses.pkl' % (args.models_dir, args.filename_prefix)
-elif to_visualize == 'm' and not args.is_conditional:
-    format_string = '%s%s_{mode}_{is_conditional}_{loss}_{pmask_slope}_{sample_slope}_{sparsity}_{lr}/mask.npy' % (args.models_dir, args.filename_prefix)
-elif to_visualize == 'm' and args.is_conditional:
-    format_string = '%s%s_{mode}_{is_conditional}_{loss}_{pmask_slope}_{sample_slope}_{sparsity}_{lr}/model.4991.h5' % (args.models_dir, args.filename_prefix)
+    format_string = '%s%s_{mode}_{loss}_{pmask_slope}_{sample_slope}_{sparsity}_{lr}/losses.pkl' % (args.models_dir, args.filename_prefix)
+elif to_visualize == 'm':
+    format_string = '%s%s_{mode}_{loss}_{pmask_slope}_{sample_slope}_{sparsity}_{lr}/model.141.h5' % (args.models_dir, args.filename_prefix)
 elif to_visualize == 's':
-    format_string = '%s%s_{mode}_{is_conditional}_{loss}_{pmask_slope}_{sample_slope}_{sparsity}_{lr}/model.249.h5' % (args.models_dir, args.filename_prefix)
+    format_string = '%s%s_{mode}_{loss}_{pmask_slope}_{sample_slope}_{sparsity}_{lr}/model.249.h5' % (args.models_dir, args.filename_prefix)
 else:
     sys.exit('Invalid input')
 
 format_string_filled = format_string.format(
     mode=parameter_dict['mode'],
-    is_conditional=parameter_dict['is_conditional'],
     loss=parameter_dict['loss'],
     pmask_slope=parameter_dict['pmask_slope'],
     sample_slope=parameter_dict['sample_slope'],
@@ -100,17 +94,17 @@ for i, path in enumerate(filepaths):
         f = open(path, 'rb') 
         losses = pickle.load(f)
         color = next(ax._get_lines.prop_cycler)['color']
-        plt.plot(losses['loss'], label='Train loss, is_cond = %s, loss = %s, sparsity = %s' % (parsed['is_conditional'], parsed['loss'], parsed['sparsity']), color=color)
+        plt.plot(losses['loss'], label='Train loss, loss = %s, sparsity = %s' % (parsed['loss'], parsed['sparsity']), color=color)
         plt.plot(losses['val_loss'], label='Val loss, loss = %s, sparsity = %s' % (parsed['loss'], parsed['sparsity']), color=color, linestyle='dashed')
         plt.grid()
         plt.xlabel('Epoch')
         plt.legend(loc='upper right')
         # plt.ylim([0, max(max(losses['loss']), max(losses['val_loss']))])
-        plt.ylim([0, 0.001])
+        plt.ylim([0.005, 0.0125])
         plt.grid(True)
-        plt.title('2LC Loss')
+        plt.title('EPI Loss')
 
-    elif path.endswith('.h5') and args.is_conditional:
+    elif path.endswith('.h5'):
         checkpoint = torch.load(path)
 
         model = loupe_pytorch.model.CondLoupe((320, 320, 2), pmask_slope=5, sample_slope=100, \
@@ -124,7 +118,7 @@ for i, path in enumerate(filepaths):
             print(mask.shape)
             mask = np.fft.fftshift(mask[0].detach().cpu().numpy())
             v += 1
-            ax = subplot(subplot_l, subplot_w, v)
+            ax = subplot(subplot_nrow, subplot_ncol, v)
             ax.set_title(str(round(i, 2)))
             im = ax.imshow(mask, cmap='gray')
             # fig.colorbar(im, ax=ax)
@@ -140,7 +134,7 @@ for i, path in enumerate(filepaths):
         mask = np.load(path)
         mask = np.fft.fftshift(mask)
         v += 1
-        ax = subplot(subplot_l, subplot_w, v)
+        ax = subplot(subplot_nrow, subplot_ncol, v)
         ax.set_title('loss = %s, sparsity = %s' % (parsed['loss'], parsed['sparsity']))
         im = ax.imshow(mask, cmap='gray')
         fig.colorbar(im, ax=ax)

@@ -76,7 +76,6 @@ def train_model(model, criterion, optimizer, dataloaders, num_epochs, device, fi
                 x = x.to(device)
                 condition = condition.float().to(device)
                 condition = condition.unsqueeze(1)
-                print(condition)
                 optimizer.zero_grad()
 
                 with torch.set_grad_enabled(phase == 'train'):
