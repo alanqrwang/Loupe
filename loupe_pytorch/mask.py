@@ -22,14 +22,17 @@ class CondMask(nn.Module):
         assert straight_through_mode in ['ste-identity', 'ste-sigmoid-fixed', 'ste-sigmoid-anneal', 'relax'], \
                        'mode should be ste-identity, ste-sigmoid-fixed, ste-sigmoid-anneal, relax'
         self.straight_through_mode = straight_through_mode
+        self.sigmoid = nn.Sigmoid()
         
-        # MaskNet
-        self.fc1 = nn.Linear(1, self.image_dims[0]*self.image_dims[1])
+        # MaskNet outputs a vector of probabilities corresponding to image height
+        self.fc1 = nn.Linear(1, self.image_dims[0])
         self.relu = nn.ReLU()
-        self.local1 = LocalConnected2d(self.image_dims[0]*self.image_dims[1])
 
     def squash_mask(self, mask):
-        return torch.sigmoid(self.pmask_slope*mask)
+        # Takes in probability vector and outputs 2d probability mask  
+        mask = mask.unsqueeze(-1)
+        mask = mask.expand(-1, -1, self.image_dims[1])
+        return self.sigmoid(self.pmask_slope*mask)
     
     def sparsify(self, mask):
         mask_out = torch.zeros_like(mask)
@@ -42,16 +45,15 @@ class CondMask(nn.Module):
         return le * mask * r + (1-le) * (1 - (1 - mask) * beta)
 
     def threshold(self, mask):
-        random_uniform = torch.empty_like(mask).uniform_(0, 1).to(self.device)
-        return torch.sigmoid(self.sample_slope*(mask - random_uniform))
+        random_uniform = torch.empty(mask.shape[0], self.image_dims[0], self.image_dims[1]).uniform_(0, 1).to(self.device)
+        return self.sigmoid(self.sample_slope*(mask - random_uniform))
     
     def forward(self, condition, epoch=0, tot_epochs=0):
         fc_out = self.relu(self.fc1(condition))
-        probmask = self.local1(fc_out)
 
-        probmask = probmask.view(len(probmask), self.image_dims[0], self.image_dims[1])
+        # probmask is of shape (B, img_height)
         # Apply probabilistic mask
-        probmask = self.squash_mask(probmask)
+        probmask = self.squash_mask(fc_out)
         # Sparsify
         sparse_mask = self.sparsify(probmask)
         # Threshold

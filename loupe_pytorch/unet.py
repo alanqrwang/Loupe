@@ -29,7 +29,6 @@ class Unet(nn.Module):
         )
     
     def forward(self, x):
-        print('IN UNET')
         conv1 = self.dconv_down1(x)
         x = self.maxpool(conv1)
 

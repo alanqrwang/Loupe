@@ -43,10 +43,6 @@ parser.add_argument('--loss', default='mae', type=str, help='loss to use')
 parser.add_argument('--load_checkpoint', default=0, type=int, help='loss to use')
 parser.add_argument('--straight_through_mode', default='relax', type=str, help='loss to use')
 
-parser.add_argument('--use_conditional', dest='is_conditional', action='store_true')
-parser.add_argument('--not_use_conditional', dest='is_conditional', action='store_false')
-parser.set_defaults(conditional=True)
-
 parser.add_argument('--train_loupe', dest='train_loupe', action='store_true')
 parser.add_argument('--train_unet', dest='train_loupe', action='store_false')
 parser.set_defaults(train_loupe=True)
@@ -61,7 +57,7 @@ def save_checkpoint(epoch, model_state, optimizer_state, loss, val_loss, filenam
         }
     torch.save(state, filename.format(epoch=epoch+1))
 
-def train_model(model, criterion, optimizer, dataloaders, num_epochs, device, filename, straight_through_mode, load_checkpoint, is_conditional):
+def train_model(model, criterion, optimizer, dataloaders, num_epochs, device, filename, straight_through_mode, load_checkpoint):
     loss_list = []
     val_loss_list = []
     for epoch in range(load_checkpoint, num_epochs):
@@ -76,43 +72,25 @@ def train_model(model, criterion, optimizer, dataloaders, num_epochs, device, fi
             epoch_loss = 0
             epoch_samples = 0
 
-            if is_conditional:
-                for batch_idx, (x, _, condition) in tqdm(enumerate(dataloaders[phase]), total=len(dataloaders[phase])):   
-                    x = x.to(device)
-                    condition = condition.float().to(device)
-                    condition = condition.unsqueeze(1)
-                    print(condition)
-                    optimizer.zero_grad()
+            for batch_idx, (x, _, condition) in tqdm(enumerate(dataloaders[phase]), total=len(dataloaders[phase])):   
+                x = x.to(device)
+                condition = condition.float().to(device)
+                condition = condition.unsqueeze(1)
+                print(condition)
+                optimizer.zero_grad()
 
-                    with torch.set_grad_enabled(phase == 'train'):
-                        output = model(x, condition)
-                        loss = criterion(output, x)
+                with torch.set_grad_enabled(phase == 'train'):
+                    output = model(x, condition)
+                    loss = criterion(output, x)
 
-                        epoch_loss += loss.data.cpu().numpy() * x.size(0)
+                    epoch_loss += loss.data.cpu().numpy() * x.size(0)
 
-                        if phase == 'train':
-                            loss.backward()
-                            optimizer.step()
+                    if phase == 'train':
+                        loss.backward()
+                        optimizer.step()
 
-                    # statistics
-                    epoch_samples += x.size(0)
-            else:
-                for batch_idx, (x, _) in tqdm(enumerate(dataloaders[phase]), total=len(dataloaders[phase])):   
-                    x = x.to(device)
-                    optimizer.zero_grad()
-
-                    with torch.set_grad_enabled(phase == 'train'):
-                        output = model(x)
-                        loss = criterion(output, x)
-
-                        epoch_loss += loss.data.cpu().numpy() * x.size(0)
-
-                        if phase == 'train':
-                            loss.backward()
-                            optimizer.step()
-
-                    # statistics
-                    epoch_samples += x.size(0)
+                # statistics
+                epoch_samples += x.size(0)
 
             epoch_loss /= epoch_samples
             if phase == 'train':
@@ -126,20 +104,6 @@ def train_model(model, criterion, optimizer, dataloaders, num_epochs, device, fi
             save_checkpoint(epoch, model.state_dict(), optimizer.state_dict(), train_epoch_loss, val_epoch_loss, filename)
 
     return model, loss_list, val_loss_list
-
-def get_conditions(leng, new_indices):
-    res = []
-    for i in range(leng):
-        for index in range(len(new_indices)):
-            if new_indices[index] > i:
-                break
-            
-        if index == new_indices[index-1]:
-            diff = 0
-        else:
-            diff = (i - new_indices[index-1]) / (new_indices[index] - new_indices[index-1])
-        res.append(diff)
-    return res
 
 def main():
     ###############################################
@@ -167,26 +131,15 @@ def main():
 
     print('loading data...')
     # xdata = np.load(args.data_path)
-    xdata = np.load('./cond_dataset/brain_knee_dataset.npy')
-    if args.is_conditional:
-        # new_indices = np.load('./new_indices_nyu_dataset_update.npy')
-
-        # conditions = get_conditions(len(xdata), new_indices)
-        conditions = np.load('./cond_dataset/brain_knee_conditions.npy')
-        print(conditions)
-        trainset = loupe_pytorch.Dataset.CondDataset(xdata[:int(len(xdata)*0.7)], xdata[:int(len(xdata)*0.7)], conditions[:int(len(xdata)*0.7)])
-        valset = loupe_pytorch.Dataset.CondDataset(xdata[int(len(xdata)*0.7):], xdata[int(len(xdata)*0.7):], conditions[int(len(xdata)*0.7):])
-        dataloaders = {
-            'train': torch.utils.data.DataLoader(trainset, **params),
-            'val': torch.utils.data.DataLoader(valset, **params)
-        }
-    else:
-        trainset = loupe_pytorch.Dataset.Dataset(xdata[:int(len(xdata)*0.7)], xdata[:int(len(xdata)*0.7)])
-        valset = loupe_pytorch.Dataset.Dataset(xdata[int(len(xdata)*0.7):], xdata[int(len(xdata)*0.7):])
-        dataloaders = {
-            'train': torch.utils.data.DataLoader(trainset, **params),
-            'val': torch.utils.data.DataLoader(valset, **params)
-        }
+    xdata = np.load('./cond_dataset/binary_dataset.npy')
+    conditions = np.load('./cond_dataset/binary_conditions.npy')
+    print(conditions)
+    trainset = loupe_pytorch.Dataset.CondDataset(xdata[:int(len(xdata)*0.7)], xdata[:int(len(xdata)*0.7)], conditions[:int(len(xdata)*0.7)])
+    valset = loupe_pytorch.Dataset.CondDataset(xdata[int(len(xdata)*0.7):], xdata[int(len(xdata)*0.7):], conditions[int(len(xdata)*0.7):])
+    dataloaders = {
+        'train': torch.utils.data.DataLoader(trainset, **params),
+        'val': torch.utils.data.DataLoader(valset, **params)
+    }
 
     if xdata.shape[-1] == 1:
         print('appending complex dimension into dataset')
@@ -198,11 +151,7 @@ def main():
     ###############################################
     # Define models
     ###############################################
-    if args.train_loupe and not args.is_conditional:
-        print('I\'m training normal Loupe!')
-        model = loupe_pytorch.model.Loupe(image_dims, pmask_slope=args.pmask_slope, sample_slope=args.sample_slope, \
-                                             sparsity=args.desired_sparsity, device=args.device)
-    elif args.train_loupe and args.is_conditional:
+    if args.train_loupe:
         print('I\'m training conditional Loupe!')
         model = loupe_pytorch.model.CondLoupe(image_dims, pmask_slope=args.pmask_slope, sample_slope=args.sample_slope, \
                                              sparsity=args.desired_sparsity, device=args.device)
@@ -225,9 +174,8 @@ def main():
     # I/O user input and model saving
     ###############################################
     # prepare save sub-folder
-    local_name = '{prefix}_{is_conditional}_{straight_through_mode}_{loss}_{pmask_slope}_{sample_slope}_{sparsity}_{lr}'.format(
+    local_name = '{prefix}_{straight_through_mode}_{loss}_{pmask_slope}_{sample_slope}_{sparsity}_{lr}'.format(
         prefix=args.filename_prefix,
-        is_conditional=args.is_conditional,
         straight_through_mode=args.straight_through_mode,
         loss=args.loss,
         pmask_slope=args.pmask_slope,
@@ -335,7 +283,7 @@ def main():
     # Train model
     ###############################################
     model, train_loss, val_loss = train_model(model, criterion, optimizer, dataloaders, args.nb_epochs_train, \
-                                    args.device, filename, args.straight_through_mode, args.load_checkpoint, args.is_conditional)
+                                    args.device, filename, args.straight_through_mode, args.load_checkpoint)
 
     ###############################################
     # Save training loss
@@ -360,15 +308,15 @@ def main():
     ###############################################
     # Save learned mask
     ###############################################
-    if args.train_loupe and not args.is_conditional:
-        mask = model.mask(args.straight_through_mode)
-        if len(mask.shape) == 3:
-            mask = mask[0].detach().cpu().numpy()
-        else:
-            mask = mask.detach().cpu().numpy()
-        mask_filename = os.path.join(save_dir_loupe, 'mask.npy')
-        np.save(mask_filename, mask) 
-        print('saved mask to', mask_filename)
+    # if args.train_loupe and not args.is_conditional:
+    #     mask = model.mask(args.straight_through_mode)
+    #     if len(mask.shape) == 3:
+    #         mask = mask[0].detach().cpu().numpy()
+    #     else:
+    #         mask = mask.detach().cpu().numpy()
+    #     mask_filename = os.path.join(save_dir_loupe, 'mask.npy')
+    #     np.save(mask_filename, mask) 
+    #     print('saved mask to', mask_filename)
 
 if __name__ == "__main__":
     main()

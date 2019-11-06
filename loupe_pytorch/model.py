@@ -12,8 +12,8 @@ def undersample(x, mask):
     if len(mask.shape) == 2: # This will be the case for normal Loupe
         mask = mask.expand(x.shape[0], -1, -1)
     undersampled_x = torch.zeros_like(x)
-    undersampled_x[:,:,:,0] = torch.mul(x[:,:,:,0], mask[:,:,:])
-    undersampled_x[:,:,:,1] = torch.mul(x[:,:,:,1], mask[:,:,:])
+    undersampled_x[:,:,:,0] = torch.mul(x[:,:,:,0], mask)
+    undersampled_x[:,:,:,1] = torch.mul(x[:,:,:,1], mask)
     return undersampled_x
 
 class CondLoupe(nn.Module):
@@ -33,7 +33,6 @@ class CondLoupe(nn.Module):
 
     def forward(self, x, condition):
         # if necessary, concatenate with zeros for FFT
-        print('In cond loupe forward')
         if x.shape[-1] == 1:
             x = torch.cat((x, torch.zeros_like(x)), dim=3)
 
