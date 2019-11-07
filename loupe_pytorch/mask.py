@@ -27,6 +27,7 @@ class CondMask(nn.Module):
         # MaskNet outputs a vector of probabilities corresponding to image height
         self.fc1 = nn.Linear(1, self.image_dims[0])
         self.relu = nn.ReLU()
+        self.fc_final = nn.Linear(self.image_dims[0], self.image_dims[0])
 
     def squash_mask(self, mask):
         # Takes in probability vector and outputs 2d probability mask  
@@ -48,23 +49,25 @@ class CondMask(nn.Module):
         random_uniform = torch.empty(mask.shape[0], self.image_dims[0]).uniform_(0, 1).to(self.device)
         random_uniform = random_uniform.unsqueeze(-1)
         random_uniform = random_uniform.expand(-1, -1, self.image_dims[1])
-        return self.sigmoid(self.sample_slope*(mask - random_uniform))
+        return self.sigmoid(self.sample_slope * (mask - random_uniform))
     
-    def forward(self, condition, epoch=0, tot_epochs=0):
+    def forward(self, condition, get_prob_mask=False, epoch=0, tot_epochs=0):
         fc_out = self.relu(self.fc1(condition))
+        fc_out = self.fc_final(fc_out)
 
         # probmask is of shape (B, img_height)
         # Apply probabilistic mask
         probmask = self.squash_mask(fc_out)
         # Sparsify
-        # sparse_mask = self.sparsify(probmask)
-        # # Threshold
-        # if self.straight_through_mode == 'ste-identity':
-        #     stidentity = straight_through_sample.STIdentity.apply
-        #     mask = stidentity(sparse_mask)
-        # elif self.straight_through_mode == 'ste-sigmoid':
-        #     stsigmoid = straight_through_sample.STSigmoid.apply
-        #     mask = stsigmoid(sparse_mask, epoch, tot_epochs)
-        # else:
-        #     mask = self.threshold(sparse_mask)
-        return probmask
+        sparse_mask = self.sparsify(probmask)
+        # Threshold
+        if self.straight_through_mode == 'ste-identity':
+            stidentity = straight_through_sample.STIdentity.apply
+            mask = stidentity(sparse_mask)
+        elif self.straight_through_mode == 'ste-sigmoid':
+            stsigmoid = straight_through_sample.STSigmoid.apply
+            mask = stsigmoid(sparse_mask, epoch, tot_epochs)
+        else:
+            mask = self.threshold(sparse_mask)
+
+        return mask

@@ -45,7 +45,7 @@ to_visualize = input("loss, mask, or slice? l/m/s ")
 if to_visualize == 'l':
     format_string = '%s%s_{mode}_{loss}_{pmask_slope}_{sample_slope}_{sparsity}_{lr}/losses.pkl' % (args.models_dir, args.filename_prefix)
 elif to_visualize == 'm':
-    format_string = '%s%s_{mode}_{loss}_{pmask_slope}_{sample_slope}_{sparsity}_{lr}/model.141.h5' % (args.models_dir, args.filename_prefix)
+    format_string = '%s%s_{mode}_{loss}_{pmask_slope}_{sample_slope}_{sparsity}_{lr}/model.191.h5' % (args.models_dir, args.filename_prefix)
 elif to_visualize == 's':
     format_string = '%s%s_{mode}_{loss}_{pmask_slope}_{sample_slope}_{sparsity}_{lr}/model.249.h5' % (args.models_dir, args.filename_prefix)
 else:
@@ -72,12 +72,8 @@ cont = input('\nContinue? y/n: ')
 if cont == 'y': pass
 else: sys.exit('User stopped')
 
-fig = plt.figure(figsize=[args.w, args.h])
-ax = plt.gca()
+fig, axes = plt.subplots(3, 4)
 v = 0
-
-subplot_nrow = 1
-subplot_ncol = 3
 
 # print('loading data...')
 # xdata = np.load(args.data_path, mmap_mode='r')
@@ -100,7 +96,7 @@ for i, path in enumerate(filepaths):
         plt.xlabel('Epoch')
         plt.legend(loc='upper right')
         # plt.ylim([0, max(max(losses['loss']), max(losses['val_loss']))])
-        plt.ylim([0.005, 0.0125])
+        plt.ylim([0.000, 0.0125])
         plt.grid(True)
         plt.title('EPI Loss')
 
@@ -114,20 +110,43 @@ for i, path in enumerate(filepaths):
 
         for i in [0., 0.5, 1.]:
             inp = torch.tensor([i]).view(1, 1).to(args.device)
-            mask = model.mask(inp)
-            print(mask.shape)
+            learned_weights, probmask, rf, mask = model.mask(inp, get_prob_mask = False)
+            learned_weights = np.fft.fftshift(learned_weights[0].detach().cpu().numpy())
             mask = np.fft.fftshift(mask[0].detach().cpu().numpy())
-            v += 1
-            ax = subplot(subplot_nrow, subplot_ncol, v)
-            ax.set_title(str(round(i, 2)))
-            im = ax.imshow(mask, cmap='gray')
-            # fig.colorbar(im, ax=ax)
+            probmask = np.fft.fftshift(probmask[0].detach().cpu().numpy())
+            rf = np.fft.fftshift(rf[0].detach().cpu().numpy())
+
+            print(np.min(learned_weights), 'min weights')
+            print(np.max(learned_weights), 'max weights')
+            print(np.min(probmask), 'prob')
+            print(np.min(rf), 'rf')
+            print(np.min(mask), 'mask')
+
+            ax = axes[v, 0]
+            ax.set_title('learned_weights' + str(round(i, 2)))
+            im = ax.imshow(learned_weights, cmap='gray')
+            ax.axis('off')
+            fig.colorbar(im, ax=ax)
+
+            ax = axes[v, 1]
+            ax.set_title('prob' + str(round(i, 2)))
+            im = ax.imshow(probmask, cmap='gray', vmin=0, vmax=1)
+            ax.axis('off')
+            fig.colorbar(im, ax=ax)
+
+            ax = axes[v, 2]
+            ax.set_title('rf' + str(round(i, 2)))
+            im = ax.imshow(rf, cmap='gray', vmin=0, vmax=1)
+            ax.axis('off')
+            fig.colorbar(im, ax=ax)
+
+            ax = axes[v, 3]
+            ax.set_title('mask' + str(round(i, 2)))
+            im = ax.imshow(mask, cmap='gray', vmin=0, vmax=1)
+            fig.colorbar(im, ax=ax)
+            ax.axis('off')
             fig.suptitle('Masks for Knee')
-            # loss = checkpoint['loss']
-            # loss_list.append(loss)
-        # np.savetxt('./losses.txt', loss_list)
-        # plt.plot(loss_list)
-        plt.imshow(mask, cmap='gray')
+            v += 1
 
     # Mask
     elif path.endswith('.npy') and not args.is_conditional:
