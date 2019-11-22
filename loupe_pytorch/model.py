@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 
 from . import unet, mask, straight_through_sample
+from modl import unet_with_dc 
     
 def complex_abs(x):
     # Tensor should be of shape (N, l, w, 2)
@@ -16,32 +17,38 @@ def undersample(x, mask):
     undersampled_x[:,:,:,1] = torch.mul(x[:,:,:,1], mask)
     return undersampled_x
 
-class CondLoupe(nn.Module):
-    def __init__(self, image_dims, pmask_slope, sample_slope, sparsity, device, straight_through_mode='relax'):
-        super(CondLoupe, self).__init__()
+class Loupe(nn.Module):
+    def __init__(self, image_dims, pmask_slope, sample_slope, sparsity, device, recon_type, is_epi, straight_through_mode='relax', K=1):
+        super(Loupe, self).__init__()
         self.image_dims = image_dims
         self.pmask_slope = pmask_slope
         self.sample_slope = sample_slope
         self.sparsity = sparsity
         self.device = device
+        self.recon_type = recon_type
 
         # Mask
-        self.mask = mask.CondMask(image_dims, pmask_slope, sample_slope, sparsity, device, straight_through_mode)
+        self.mask = mask.Mask(image_dims, pmask_slope, sample_slope, sparsity, device, straight_through_mode, is_epi)
 
         # Unet
         self.unet = unet.Unet(image_dims)
 
-    def forward(self, x, condition):
-        # if necessary, concatenate with zeros for FFT
-        if x.shape[-1] == 1:
-            x = torch.cat((x, torch.zeros_like(x)), dim=3)
+        # Modl from Jinwei
+        self.modl = unet_with_dc.Unet_with_DC(input_channels=image_dims[-1], 
+                                      output_channels=image_dims[-1], 
+                                      num_filters=[2**i for i in range(5, 10)],
+                                      lambda_dll2=0.001,
+                                      K=K)
+
+    def forward(self, x):
+        assert x.shape[-1] == 2, 'data must have complex dimension'
 
         # input -> kspace via FFT
         x = torch.fft(x, signal_ndim=2)
 
         # build probability mask
-        mask = self.mask(condition)
-        
+        mask = self.mask()
+
         # Under-sample and back to image space via IFFT
         x = undersample(x, mask)
         x = torch.ifft(x, signal_ndim=2).to(self.device)
@@ -49,15 +56,87 @@ class CondLoupe(nn.Module):
         # Complex absolute layer
         abs_tensor = complex_abs(x)
 
-        # hard-coded UNet
         x = x.view(-1, 2, self.image_dims[0], self.image_dims[1]) # Reshape for convolution
-        x = self.unet(x)
-        unet_tensor = x.view(-1, self.image_dims[0], self.image_dims[1], 2) # Reshape for convolution
+        if self.recon_type == 'unet':
+            # hard-coded UNet
+            x = self.unet(x)
 
+        else:
+            mask = mask.unsqueeze(-1)
+            mask = mask.expand(-1, -1, self.image_dims[-1])
+            mask = mask.expand(len(x), -1, -1, -1)
+            mask = mask[:, None, ...]
+            print('MASK', mask.shape)
+
+            x = self.modl(x, torch.ones_like(mask), mask)
+
+        x = x.view(-1, self.image_dims[0], self.image_dims[1], 2) # Reshape for convolution
         # final output from model
-        out = unet_tensor + abs_tensor
-
+        # out = x + abs_tensor
+        out = x
         return out
+
+class CondLoupe(nn.Module):
+    def __init__(self, image_dims, pmask_slope, sample_slope, sparsity, device, recon_type, straight_through_mode='relax'):
+        super(CondLoupe, self).__init__()
+        self.image_dims = image_dims
+        self.pmask_slope = pmask_slope
+        self.sample_slope = sample_slope
+        self.sparsity = sparsity
+        self.device = device
+        self.recon_type = recon_type   
+
+        # Mask
+        self.mask = mask.CondMask(image_dims, pmask_slope, sample_slope, sparsity, device, straight_through_mode)
+
+        assert recon_type in ['unet', 'modl']
+        # Unet
+        self.unet = unet.Unet(image_dims)
+
+        # Modl from Jinwei
+        self.modl = unet_with_dc.Unet_with_DC(input_channels=image_dims[-1], 
+                                      output_channels=image_dims[-1], 
+                                      num_filters=[2**i for i in range(5, 10)],
+                                      lambda_dll2=0.001,
+                                      K=1)
+
+    def forward(self, x, condition):
+        if self.recon_type == 'unet':
+            # hard-coded UNet
+            # if necessary, concatenate with zeros for FFT
+            if x.shape[-1] == 1:
+                x = torch.cat((x, torch.zeros_like(x)), dim=3)
+
+            # input -> kspace via FFT
+            x = torch.fft(x, signal_ndim=2)
+
+            # build probability mask
+            mask = self.mask(condition)
+            
+            # Under-sample and back to image space via IFFT
+            x = undersample(x, mask)
+            x = torch.ifft(x, signal_ndim=2).to(self.device)
+
+            # Complex absolute layer
+            abs_tensor = complex_abs(x)
+
+            x = x.view(-1, 2, self.image_dims[0], self.image_dims[1]) # Reshape for convolution
+            x = self.unet(x)
+            unet_tensor = x.view(-1, self.image_dims[0], self.image_dims[1], 2) # Reshape for convolution
+
+            # final output from model
+            out = unet_tensor + abs_tensor
+            return out
+
+        else:
+            # build probability mask
+            mask = self.mask(condition)
+
+            x = self.modl(x, torch.ones_like(mask), mask)
+
+            return x
+
+
 
 class UnetLoupe(nn.Module):
     def __init__(self, image_dims, sample_slope, device, sample_mask):

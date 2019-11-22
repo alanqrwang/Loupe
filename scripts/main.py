@@ -31,36 +31,47 @@ parser.add_argument('-j', '--workers', default=8, type=int, metavar='N',
                     help='number of data loading workers (default: 8)')
 parser.add_argument('--desired_sparsity', default=0.05, type=float, metavar='N',
                     help='percentage of sparsity of undersampling')
-parser.add_argument('--pmask_slope', default=5, type=float, metavar='N',
+parser.add_argument('--pmask_slope', default=0.25, type=float, metavar='N',
                     help='percentage of sparsity of undersampling')
-parser.add_argument('--sample_slope', default=12, type=float, metavar='N',
+parser.add_argument('--sample_slope', default=100, type=float, metavar='N',
                     help='percentage of sparsity of undersampling')
+parser.add_argument('--num_modl_iters', default=1, type=int, metavar='N',
+                    help='K value for MoDL')
 
-parser.add_argument('--filename_prefix', default='loupe-pytorch-mri', type=str, help='filename prefix')
+parser.add_argument('--load_checkpoint', default=0, type=int, help='loss to use')
+parser.add_argument('--filename_prefix', type=str, help='filename prefix', required=True)
 parser.add_argument('--models_dir', default='../models/', type=str, help='directory to save models')
 parser.add_argument('--data_path', default='/nfs02/data/processed_nyu/NYU_training_Biograph.npy', type=str, help='path to data')
-parser.add_argument('--loss', default='mae', type=str, help='loss to use')
-parser.add_argument('--load_checkpoint', default=0, type=int, help='loss to use')
-parser.add_argument('--straight_through_mode', default='relax', type=str, help='loss to use')
 
-parser.add_argument('--train_loupe', dest='train_loupe', action='store_true')
-parser.add_argument('--train_unet', dest='train_loupe', action='store_false')
-parser.set_defaults(train_loupe=True)
+parser.add_argument('--loss', choices=['mse', 'mae'], type=str, help='loss to use', required=True)
+parser.add_argument('--straight_through_mode', choices=['ste-identity', 'ste-sigmoid-fixed', 'ste-sigmoid-anneal', 'relax'], default='relax', type=str, help='straight-through type')
+parser.add_argument('--recon_type', choices=['unet', 'modl'], default='unet', type=str, help='loss to use')
+
+def add_bool_arg(parser, name, default=True):
+    group = parser.add_mutually_exclusive_group(required=False)
+    group.add_argument('--' + name, dest=name, action='store_true')
+    group.add_argument('--no_' + name, dest=name, action='store_false')
+    parser.set_defaults(**{name:default})
+
+add_bool_arg(parser, 'train_loupe')
+add_bool_arg(parser, 'train_cond')
+add_bool_arg(parser, 'is_epi')
+
 
 def save_checkpoint(epoch, model_state, optimizer_state, loss, val_loss, filename):
     state = {
-            'epoch': epoch+1,
-            'state_dict': model_state,
-            'optimizer' : optimizer_state,
-            'loss' : loss,
-            'val_loss' : val_loss
-        }
-    torch.save(state, filename.format(epoch=epoch+1))
+        'epoch': epoch,
+        'state_dict': model_state,
+        'optimizer' : optimizer_state,
+        'loss' : loss,
+        'val_loss' : val_loss
+    }
+    torch.save(state, filename.format(epoch=epoch))
 
-def train_model(model, criterion, optimizer, dataloaders, num_epochs, device, filename, straight_through_mode, load_checkpoint):
+def train_model(model, criterion, optimizer, dataloaders, num_epochs, device, filename, straight_through_mode, load_checkpoint, train_cond):
     loss_list = []
     val_loss_list = []
-    for epoch in range(load_checkpoint, num_epochs):
+    for epoch in range(load_checkpoint+1, num_epochs+1):
         for phase in ['train', 'val']:
             if phase == 'train':
                 print('TRAIN EPOCH ' + str(epoch))
@@ -72,24 +83,42 @@ def train_model(model, criterion, optimizer, dataloaders, num_epochs, device, fi
             epoch_loss = 0
             epoch_samples = 0
 
-            for batch_idx, (x, _, condition) in tqdm(enumerate(dataloaders[phase]), total=len(dataloaders[phase])):   
-                x = x.to(device)
-                condition = condition.float().to(device)
-                condition = condition.unsqueeze(1)
-                optimizer.zero_grad()
+            if train_cond:
+                for batch_idx, (x, _, condition) in tqdm(enumerate(dataloaders[phase]), total=len(dataloaders[phase])):   
+                    x = x.float().to(device)
+                    condition = condition.float().to(device)
+                    condition = condition.unsqueeze(1)
+                    optimizer.zero_grad()
 
-                with torch.set_grad_enabled(phase == 'train'):
-                    output = model(x, condition)
-                    loss = criterion(output, x)
+                    with torch.set_grad_enabled(phase == 'train'):
+                        output = model(x, condition)
+                        loss = criterion(output, x)
 
-                    epoch_loss += loss.data.cpu().numpy() * x.size(0)
+                        epoch_loss += loss.data.cpu().numpy() * x.size(0)
 
-                    if phase == 'train':
-                        loss.backward()
-                        optimizer.step()
+                        if phase == 'train':
+                            loss.backward()
+                            optimizer.step()
 
-                # statistics
-                epoch_samples += x.size(0)
+                    # statistics
+                    epoch_samples += x.size(0)
+            else:
+                for batch_idx, (x, _) in tqdm(enumerate(dataloaders[phase]), total=len(dataloaders[phase])):   
+                    x = x.float().to(device)
+                    optimizer.zero_grad()
+
+                    with torch.set_grad_enabled(phase == 'train'):
+                        output = model(x)
+                        loss = criterion(output, x)
+
+                        epoch_loss += loss.data.cpu().numpy() * x.size(0)
+
+                        if phase == 'train':
+                            loss.backward()
+                            optimizer.step()
+
+                    # statistics
+                    epoch_samples += x.size(0)
 
             epoch_loss /= epoch_samples
             if phase == 'train':
@@ -109,7 +138,6 @@ def main():
     # Argument parsing and gpu handling
     ###############################################
     args = parser.parse_args()
-    args.device = None
     if torch.cuda.is_available():
         args.device = torch.device('cuda:'+str(args.gpu_id))
     else:
@@ -128,40 +156,73 @@ def main():
               'num_workers': args.workers}
 
 
-    print('loading data...')
-    # xdata = np.load(args.data_path)
-    xdata = np.load('./cond_dataset/binary_dataset.npy')
-    conditions = np.load('./cond_dataset/binary_conditions.npy')
-    print(conditions)
-    trainset = loupe_pytorch.Dataset.CondDataset(xdata[:int(len(xdata)*0.7)], xdata[:int(len(xdata)*0.7)], conditions[:int(len(xdata)*0.7)])
-    valset = loupe_pytorch.Dataset.CondDataset(xdata[int(len(xdata)*0.7):], xdata[int(len(xdata)*0.7):], conditions[int(len(xdata)*0.7):])
+    print('Loading data...')
+
+    if args.train_cond:
+        xdata = np.load('./cond_dataset/binary_dataset.npy')
+        conditions = np.load('./cond_dataset/binary_conditions.npy')
+        trainset = loupe_pytorch.Dataset.CondDataset(xdata[:int(len(xdata)*0.7)], xdata[:int(len(xdata)*0.7)], conditions[:int(len(xdata)*0.7)])
+        valset = loupe_pytorch.Dataset.CondDataset(xdata[int(len(xdata)*0.7):], xdata[int(len(xdata)*0.7):], conditions[int(len(xdata)*0.7):])
+    else:
+        xdata = np.load(args.data_path)
+        if xdata.shape[-1] == 1:
+            print('Appending complex dimension into dataset...')
+            xdata = np.concatenate((xdata, np.zeros(xdata.shape)), axis=3)
+        trainset = loupe_pytorch.Dataset.Dataset(xdata[:int(len(xdata)*0.7)], xdata[:int(len(xdata)*0.7)])
+        valset = loupe_pytorch.Dataset.Dataset(xdata[int(len(xdata)*0.7):], xdata[int(len(xdata)*0.7):])
+
+
     dataloaders = {
         'train': torch.utils.data.DataLoader(trainset, **params),
         'val': torch.utils.data.DataLoader(valset, **params)
     }
 
-    if xdata.shape[-1] == 1:
-        print('appending complex dimension into dataset')
-        xdata = np.concatenate((xdata, np.zeros(xdata.shape)), axis=3)
-
     image_dims = xdata.shape[1:]
     print('done')
 
     ###############################################
-    # Define models
+    # Models
     ###############################################
-    if args.train_loupe:
-        print('I\'m training conditional Loupe!')
-        model = loupe_pytorch.model.CondLoupe(image_dims, pmask_slope=args.pmask_slope, sample_slope=args.sample_slope, \
-                                             sparsity=args.desired_sparsity, device=args.device)
+    if args.train_loupe and not args.train_cond:
+        if args.recon_type == 'unet':
+            print('Training vanilla Loupe with UNet recon, with epi = %s!' % str(args.is_epi))
+        else:
+            print('Training vanilla Loupe with Modl recon, with epi = %s!' % str(args.is_epi))
+
+        model = loupe_pytorch.model.Loupe(image_dims=image_dims, 
+                                          pmask_slope=args.pmask_slope, 
+                                          sample_slope=args.sample_slope, 
+                                          sparsity=args.desired_sparsity, 
+                                          device=args.device, 
+                                          is_epi=args.is_epi, 
+                                          recon_type=args.recon_type,
+                                          K=args.num_modl_iters)
+
+    elif args.train_loupe and args.train_cond:
+        if args.recon_type == 'unet':
+            print('Training conditional Loupe with UNet recon!')
+        else:
+            print('Training conditional Loupe with Modl recon!')
+
+        model = loupe_pytorch.model.CondLoupe(image_dims=image_dims, 
+                                              pmask_slope=args.pmask_slope,
+                                              sample_slope=args.sample_slope,
+                                              sparsity=args.desired_sparsity, 
+                                              device=args.device, 
+                                              recon_type=args.recon_type)
+
     else:
-        model = loupe_pytorch.model.UnetLoupe(image_dims, sample_slope=args.sample_slope, device=args.device, sample_mask=sample_mask)
+        print('Training just Unet recon!')
+        model = loupe_pytorch.model.UnetLoupe(image_dims=image_dims, 
+                                              sample_slope=args.sample_slope, 
+                                              device=args.device, 
+                                              sample_mask=sample_mask)
+
     model = model.to(args.device)
 
     ###############################################
-    # Define loss and optimizer
+    # Loss and optimizer
     ###############################################
-    assert args.loss in ['mae', 'mse'], 'loss must be mae or mse'
     if args.loss == 'mae':
         criterion = nn.L1Loss()
     else:
@@ -173,9 +234,10 @@ def main():
     # I/O user input and model saving
     ###############################################
     # prepare save sub-folder
-    local_name = '{prefix}_{straight_through_mode}_{loss}_{pmask_slope}_{sample_slope}_{sparsity}_{lr}'.format(
+    local_name = '{prefix}_{recon_type}_{straight_through_mode}_{loss}_{pmask_slope}_{sample_slope}_{sparsity}_{lr}'.format(
         prefix=args.filename_prefix,
         straight_through_mode=args.straight_through_mode,
+        recon_type=args.recon_type,
         loss=args.loss,
         pmask_slope=args.pmask_slope,
         sample_slope=args.sample_slope,
@@ -282,7 +344,7 @@ def main():
     # Train model
     ###############################################
     model, train_loss, val_loss = train_model(model, criterion, optimizer, dataloaders, args.nb_epochs_train, \
-                                    args.device, filename, args.straight_through_mode, args.load_checkpoint)
+                                    args.device, filename, args.straight_through_mode, args.load_checkpoint, args.train_cond)
 
     ###############################################
     # Save training loss
@@ -290,7 +352,7 @@ def main():
     if args.load_checkpoint != 0:
         f = open(os.path.join(save_dir_loupe, 'losses.pkl'), 'rb') 
         old_losses = pickle.load(f)
-        loss_dict = {'loss' : old_losses['loss'] + train_loss, 'val_loss' : old_losses['val_loss']}
+        loss_dict = {'loss' : old_losses['loss'] + train_loss, 'val_loss' : old_losses['val_loss'] + val_loss}
     else:
         loss_dict = {'loss' : train_loss, 'val_loss' : val_loss}
 
@@ -303,19 +365,6 @@ def main():
     pickle.dump(loss_dict,f)
     f.close()
     print('saved loss to', loss_filename)
-
-    ###############################################
-    # Save learned mask
-    ###############################################
-    # if args.train_loupe and not args.is_conditional:
-    #     mask = model.mask(args.straight_through_mode)
-    #     if len(mask.shape) == 3:
-    #         mask = mask[0].detach().cpu().numpy()
-    #     else:
-    #         mask = mask.detach().cpu().numpy()
-    #     mask_filename = os.path.join(save_dir_loupe, 'mask.npy')
-    #     np.save(mask_filename, mask) 
-    #     print('saved mask to', mask_filename)
 
 if __name__ == "__main__":
     main()
