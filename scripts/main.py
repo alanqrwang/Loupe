@@ -3,23 +3,19 @@ import torch.nn as nn
 from torch.optim import Adam
 import argparse
 import pprint
-from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-import time
-import copy
-from collections import defaultdict
 import pickle
 import glob
-import sys
 
 # User-defined modules
 import loupe_pytorch
+from io_handler import io_handler
 
 parser = argparse.ArgumentParser(description='LOUPE in Pytorch')
 
-parser.add_argument('--nb_epochs_train', default=10, type=int, metavar='N',
+parser.add_argument('--nb_epochs_train', default=300, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('-b', '--batch_size', default=16, type=int,
                     metavar='N', help='mini-batch size (default: 256)')
@@ -35,103 +31,26 @@ parser.add_argument('--pmask_slope', default=0.25, type=float, metavar='N',
                     help='percentage of sparsity of undersampling')
 parser.add_argument('--sample_slope', default=100, type=float, metavar='N',
                     help='percentage of sparsity of undersampling')
-parser.add_argument('--num_modl_iters', default=1, type=int, metavar='N',
+parser.add_argument('--num_modl_iters', default=5, type=int, metavar='N',
                     help='K value for MoDL')
 
 parser.add_argument('--load_checkpoint', default=0, type=int, help='loss to use')
-parser.add_argument('--filename_prefix', type=str, help='filename prefix', required=True)
-parser.add_argument('--models_dir', default='../models/', type=str, help='directory to save models')
+parser.add_argument('-fp', '--filename_prefix', type=str, help='filename prefix', required=True)
+parser.add_argument('--models_dir', default='/nfs02/users/aw847/models/loupe_pytorch/', type=str, help='directory to save models')
 parser.add_argument('--data_path', default='/nfs02/data/processed_nyu/NYU_training_Biograph.npy', type=str, help='path to data')
+parser.add_argument('--val_data_path', default='/nfs02/data/processed_nyu/NYU_validation_Biograph.npy', type=str, help='path to data')
 
 parser.add_argument('--loss', choices=['mse', 'mae'], type=str, help='loss to use', required=True)
 parser.add_argument('--straight_through_mode', choices=['ste-identity', 'ste-sigmoid-fixed', 'ste-sigmoid-anneal', 'relax'], default='relax', type=str, help='straight-through type')
-parser.add_argument('--recon_type', choices=['unet', 'modl'], default='unet', type=str, help='loss to use')
+parser.add_argument('--recon_type', choices=['unet', 'cascade', 'modl'], default='unet', type=str, help='loss to use')
 
-def add_bool_arg(parser, name, default=True):
-    group = parser.add_mutually_exclusive_group(required=False)
-    group.add_argument('--' + name, dest=name, action='store_true')
-    group.add_argument('--no_' + name, dest=name, action='store_false')
-    parser.set_defaults(**{name:default})
+parser.add_argument('--train_type', choices=['loupe', 'cascade-mask', 'unet-mask', 'loupe-lines-mask',
+                                             'spectrum-mask', 'coherence-mask', 'epi-vertical-mask',
+                                             'gaussian-mask', 'uniform-mask', 'epi-horizontal-mask'], required=True, type=str, help='loss to use')
 
-add_bool_arg(parser, 'train_loupe')
-add_bool_arg(parser, 'train_cond')
-add_bool_arg(parser, 'is_epi')
-
-
-def save_checkpoint(epoch, model_state, optimizer_state, loss, val_loss, filename):
-    state = {
-        'epoch': epoch,
-        'state_dict': model_state,
-        'optimizer' : optimizer_state,
-        'loss' : loss,
-        'val_loss' : val_loss
-    }
-    torch.save(state, filename.format(epoch=epoch))
-
-def train_model(model, criterion, optimizer, dataloaders, num_epochs, device, filename, straight_through_mode, load_checkpoint, train_cond):
-    loss_list = []
-    val_loss_list = []
-    for epoch in range(load_checkpoint+1, num_epochs+1):
-        for phase in ['train', 'val']:
-            if phase == 'train':
-                print('TRAIN EPOCH ' + str(epoch))
-                model.train()
-            else:
-                print('VALIDATE EPOCH ' + str(epoch))
-                model.eval()
-
-            epoch_loss = 0
-            epoch_samples = 0
-
-            if train_cond:
-                for batch_idx, (x, _, condition) in tqdm(enumerate(dataloaders[phase]), total=len(dataloaders[phase])):   
-                    x = x.float().to(device)
-                    condition = condition.float().to(device)
-                    condition = condition.unsqueeze(1)
-                    optimizer.zero_grad()
-
-                    with torch.set_grad_enabled(phase == 'train'):
-                        output = model(x, condition)
-                        loss = criterion(output, x)
-
-                        epoch_loss += loss.data.cpu().numpy() * x.size(0)
-
-                        if phase == 'train':
-                            loss.backward()
-                            optimizer.step()
-
-                    # statistics
-                    epoch_samples += x.size(0)
-            else:
-                for batch_idx, (x, _) in tqdm(enumerate(dataloaders[phase]), total=len(dataloaders[phase])):   
-                    x = x.float().to(device)
-                    optimizer.zero_grad()
-
-                    with torch.set_grad_enabled(phase == 'train'):
-                        output = model(x)
-                        loss = criterion(output, x)
-
-                        epoch_loss += loss.data.cpu().numpy() * x.size(0)
-
-                        if phase == 'train':
-                            loss.backward()
-                            optimizer.step()
-
-                    # statistics
-                    epoch_samples += x.size(0)
-
-            epoch_loss /= epoch_samples
-            if phase == 'train':
-                train_epoch_loss = epoch_loss
-                loss_list.append(epoch_loss)
-            else:
-                val_epoch_loss = epoch_loss
-                val_loss_list.append(epoch_loss)
-
-        if epoch % 10 == 0:
-            save_checkpoint(epoch, model.state_dict(), optimizer.state_dict(), train_epoch_loss, val_epoch_loss, filename)
-
-    return model, loss_list, val_loss_list
+# loupe_pytorch.utils.add_bool_arg(parser, 'train_loupe')
+loupe_pytorch.utils.add_bool_arg(parser, 'train_cond', default=False)
+loupe_pytorch.utils.add_bool_arg(parser, 'is_epi', default=False)
 
 def main():
     ###############################################
@@ -164,12 +83,19 @@ def main():
         trainset = loupe_pytorch.Dataset.CondDataset(xdata[:int(len(xdata)*0.7)], xdata[:int(len(xdata)*0.7)], conditions[:int(len(xdata)*0.7)])
         valset = loupe_pytorch.Dataset.CondDataset(xdata[int(len(xdata)*0.7):], xdata[int(len(xdata)*0.7):], conditions[int(len(xdata)*0.7):])
     else:
+        print('loading', args.data_path)
         xdata = np.load(args.data_path)
-        if xdata.shape[-1] == 1:
-            print('Appending complex dimension into dataset...')
-            xdata = np.concatenate((xdata, np.zeros(xdata.shape)), axis=3)
-        trainset = loupe_pytorch.Dataset.Dataset(xdata[:int(len(xdata)*0.7)], xdata[:int(len(xdata)*0.7)])
-        valset = loupe_pytorch.Dataset.Dataset(xdata[int(len(xdata)*0.7):], xdata[int(len(xdata)*0.7):])
+        print('loading', args.val_data_path)
+        xdata_val = np.load(args.val_data_path)
+        # if xdata.shape[-1] == 1:
+        #     print('Appending complex dimension into training set...')
+        #     xdata = np.concatenate((xdata, np.zeros(xdata.shape)), axis=3)
+        # if xdata_val.shape[-1] == 1:
+        #     print('Appending complex dimension into validation set...')
+        #     xdata_val = np.concatenate((xdata_val, np.zeros(xdata_val.shape)), axis=3)
+        image_dims = xdata.shape[1:]
+        trainset = loupe_pytorch.Dataset.Dataset(xdata, xdata)
+        valset = loupe_pytorch.Dataset.Dataset(xdata_val, xdata_val)
 
 
     dataloaders = {
@@ -177,18 +103,16 @@ def main():
         'val': torch.utils.data.DataLoader(valset, **params)
     }
 
-    image_dims = xdata.shape[1:]
-    print('done')
+    print('done', xdata.shape, xdata_val.shape)
 
     ###############################################
     # Models
     ###############################################
-    if args.train_loupe and not args.train_cond:
-        if args.recon_type == 'unet':
-            print('Training vanilla Loupe with UNet recon, with epi = %s!' % str(args.is_epi))
-        else:
-            print('Training vanilla Loupe with Modl recon, with epi = %s!' % str(args.is_epi))
 
+    
+
+    if args.train_type == 'loupe' and not args.train_cond:
+        print('Training vanilla Loupe with %s recon, with epi = %s!' % (args.recon_type, str(args.is_epi)))
         model = loupe_pytorch.model.Loupe(image_dims=image_dims, 
                                           pmask_slope=args.pmask_slope, 
                                           sample_slope=args.sample_slope, 
@@ -198,11 +122,8 @@ def main():
                                           recon_type=args.recon_type,
                                           K=args.num_modl_iters)
 
-    elif args.train_loupe and args.train_cond:
-        if args.recon_type == 'unet':
-            print('Training conditional Loupe with UNet recon!')
-        else:
-            print('Training conditional Loupe with Modl recon!')
+    elif args.train_type == 'loupe' and args.train_cond:
+        print('Training conditional Loupe with %s recon!' % (args.recon_type))
 
         model = loupe_pytorch.model.CondLoupe(image_dims=image_dims, 
                                               pmask_slope=args.pmask_slope,
@@ -212,11 +133,15 @@ def main():
                                               recon_type=args.recon_type)
 
     else:
-        print('Training just Unet recon!')
-        model = loupe_pytorch.model.UnetLoupe(image_dims=image_dims, 
-                                              sample_slope=args.sample_slope, 
-                                              device=args.device, 
-                                              sample_mask=sample_mask)
+        print('Training %s recon with discrete mask, with epi = %s!' % (args.recon_type, str(args.is_epi)))
+        model = loupe_pytorch.model.Loupe(image_dims=image_dims, 
+                                          pmask_slope=args.pmask_slope, 
+                                          sample_slope=args.sample_slope, 
+                                          sparsity=args.desired_sparsity, 
+                                          device=args.device, 
+                                          is_epi=args.is_epi, 
+                                          recon_type=args.recon_type,
+                                          K=args.num_modl_iters)
 
     model = model.to(args.device)
 
@@ -234,7 +159,7 @@ def main():
     # I/O user input and model saving
     ###############################################
     # prepare save sub-folder
-    local_name = '{prefix}_{recon_type}_{straight_through_mode}_{loss}_{pmask_slope}_{sample_slope}_{sparsity}_{lr}'.format(
+    local_name = '{prefix}_{recon_type}_{straight_through_mode}_{loss}_{pmask_slope}_{sample_slope}_{sparsity}_{lr}_{is_epi}'.format(
         prefix=args.filename_prefix,
         straight_through_mode=args.straight_through_mode,
         recon_type=args.recon_type,
@@ -242,129 +167,41 @@ def main():
         pmask_slope=args.pmask_slope,
         sample_slope=args.sample_slope,
         sparsity=args.desired_sparsity,
-        lr=args.lr)
+        lr=args.lr,
+        is_epi=args.is_epi)
 
-    save_dir_loupe = os.path.join(args.models_dir, local_name)
-    # Model with specified parameters has never been trained before
-    if not os.path.isdir(save_dir_loupe):   
-        # Can't load checkpoint if model doesn't exist
-        if args.load_checkpoint != 0:
-            sys.exit('No existing model was found.')
-        # Load benchmark mask
-        elif args.load_checkpoint == 0 and not args.train_loupe and args.masktype != 'default': 
-            print('\nTraining unet only on benchmark mask %s with sparsity level %s\n' % (args.masktype, str(args.desired_sparsity)))
-            assert args.masktype in ['EPI', 'Gaussian', 'Uniform'], 'invalid masktype'
-            assert args.desired_sparsity in [0.125, 0.25], 'invalid sparsity level'
-            filename = os.path.join(save_dir_loupe, 'model.{epoch:02d}.h5')
-            confirm = input('Creating new model filename: %s. Continue? y/n ' % filename)
-            if confirm == 'y':
-                os.makedirs(save_dir_loupe)
-            else:
-                sys.exit()
-
-            if args.desired_sparsity == 0.125:
-                local_bench_mask = '/nfs02/data/processed_nyu/Masks/%s_12.npy' % (args.masktype)
-                print('loading ' + local_bench_mask)
-                sample_mask = np.load(local_bench_mask)
-            elif args.desired_sparsity == 0.25:
-                local_bench_mask = '/nfs02/data/processed_nyu/Masks/%s_25.npy' % (args.masktype)
-                print('loading ' + local_bench_mask)
-                sample_mask = np.load(local_bench_mask)
-            else:
-                sys.exit('Error in loading benchmark mask')
-
-            sample_mask = np.fft.fftshift(sample_mask)
-            plt.imshow(sample_mask, cmap='gray') 
-            plt.colorbar()
-            plt.savefig('%s_benchmark_mask.png' % (args.masktype))
-
-            if len(sample_mask.shape) == 2:
-                sample_mask = np.expand_dims(sample_mask, 0)
-                sample_mask = np.expand_dims(sample_mask, -1)
-            if sample_mask.shape[-1] == 1:
-                sample_mask = np.concatenate((sample_mask, np.zeros(sample_mask.shape)), axis=3)
-            print(sample_mask.shape)
-            sample_mask = np.repeat(sample_mask, len(xdata), axis=0)
-            print(sample_mask.shape)
-            filename = os.path.join(save_dir_loupe, 'unet-model.{epoch:02d}.h5') 
-        # Create new model filename
-        else:
-            filename = os.path.join(save_dir_loupe, 'model.{epoch:02d}.h5')
-            confirm = input('Creating new model filename: %s. Continue? y/n ' % filename)
-            if confirm == 'y':
-                os.makedirs(save_dir_loupe)
-            else:
-                sys.exit()
-
-    # Model with specified parameters HAS been trained before
-    else: 
-        # Not loading checkpoint and training loupe+unet
-        if args.load_checkpoint == 0 and args.train_loupe:             
-            confirm = input('This model already exists, but I\'m not loading the latest checkpoint. The existing model will be overwritten. Continue? y/n ')
-            if confirm == 'y':
-                filename = os.path.join(save_dir_loupe, 'model.{epoch:02d}.h5')
-            else:
-                sys.exit()
-
-        # Not loading checkpoint and training unet only
-        elif args.load_checkpoint == 0 and not args.train_loupe: 
-            print('\nNot loading checkpoint and training unet only\n')
-            all_models = glob.glob(os.path.join(save_dir_loupe, 'model.*.h5'))
-            confirm = input('I found %s trained models. Load sample mask and train unet? y/n ' % (str(len(all_models))))
-            if confirm == 'y':
-                prob_mask = np.load(os.path.join(save_dir_loupe, 'mask.npy'))
-                prob_mask = squash_mask(torch.tensor(prob_mask))
-                prob_mask = sparsify(prob_mask)
-                prob_mask = prob_mask[..., 0].detach().cpu().numpy()
-
-                sample_mask = np.random.binomial(1, prob_mask)
-                print(sample_mask.shape)
-                mask_filename = os.path.join(save_dir_loupe, 'sample_mask.npy')
-                print('Saving sampled mask to %s' % mask_filename)
-                np.save(mask_filename, sample_mask)
-
-                sample_mask = torch.tensor(sample_mask).float().to(args.device)
-                filename = os.path.join(save_dir_loupe, 'unet-model.{epoch:02d}.h5') 
-            else:
-                sys.exit()
-
-        # Loading checkpoint 
-        else: 
-            all_models = glob.glob(os.path.join(save_dir_loupe, 'model.*.h5'))
-            confirm = input('I found %s trained models. Load %s? y/n ' % (str(len(all_models)), args.load_checkpoint))
-            if confirm == 'y':
-                filename = os.path.join(save_dir_loupe, 'model.{epoch:02d}.h5')
-                checkpoint = torch.load(filename.format(epoch=args.load_checkpoint))
-                model.load_state_dict(checkpoint['state_dict'])
-                optimizer.load_state_dict(checkpoint['optimizer'])
-            else:
-                sys.exit()
-
+    save_dir_loupe = os.path.join(args.models_dir, local_name) 
+    filename, model, optimizer, sample_mask = io_handler(save_dir_loupe, args, model, optimizer)
+    
+    if args.train_type != 'loupe':
+        sample_mask = loupe_pytorch.utils.get_sample_mask(args.train_type, args.loss, args.desired_sparsity, args.device)
+    else:
+        sample_mask = None
     ###############################################
     # Train model
     ###############################################
-    model, train_loss, val_loss = train_model(model, criterion, optimizer, dataloaders, args.nb_epochs_train, \
-                                    args.device, filename, args.straight_through_mode, args.load_checkpoint, args.train_cond)
+    model, train_loss, val_loss = loupe_pytorch.utils.train_model(model, criterion, optimizer, dataloaders, args.nb_epochs_train,
+                                    args.device, filename, args.straight_through_mode, args.load_checkpoint, args.train_cond, sample_mask)
 
     ###############################################
     # Save training loss
     ###############################################
-    if args.load_checkpoint != 0:
-        f = open(os.path.join(save_dir_loupe, 'losses.pkl'), 'rb') 
-        old_losses = pickle.load(f)
-        loss_dict = {'loss' : old_losses['loss'] + train_loss, 'val_loss' : old_losses['val_loss'] + val_loss}
-    else:
-        loss_dict = {'loss' : train_loss, 'val_loss' : val_loss}
+    # if args.load_checkpoint != 0:
+    #     f = open(os.path.join(save_dir_loupe, 'losses.pkl'), 'rb') 
+    #     old_losses = pickle.load(f)
+    #     loss_dict = {'loss' : old_losses['loss'] + train_loss, 'val_loss' : old_losses['val_loss'] + val_loss}
+    # else:
+    #     loss_dict = {'loss' : train_loss, 'val_loss' : val_loss}
 
-    if args.train_loupe:
-        loss_filename = os.path.join(save_dir_loupe, 'losses.pkl')
-    else:
-        loss_filename = os.path.join(save_dir_loupe, 'unet-losses.pkl')
+    # if args.train_loupe:
+    #     loss_filename = os.path.join(save_dir_loupe, 'losses.pkl')
+    # else:
+    #     loss_filename = os.path.join(save_dir_loupe, 'unet-losses.pkl')
 
-    f = open(loss_filename,"wb")
-    pickle.dump(loss_dict,f)
-    f.close()
-    print('saved loss to', loss_filename)
+    # f = open(loss_filename,"wb")
+    # pickle.dump(loss_dict,f)
+    # f.close()
+    # print('saved loss to', loss_filename)
 
 if __name__ == "__main__":
     main()

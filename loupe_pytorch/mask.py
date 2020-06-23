@@ -17,7 +17,7 @@ class Mask(nn.Module):
         
         # MaskNet
         if is_epi:
-            self.pmask = nn.Parameter(torch.FloatTensor(self.image_dims[0]))         
+            self.pmask = nn.Parameter(torch.FloatTensor(self.image_dims[1]))         
         else:
             self.pmask = nn.Parameter(torch.FloatTensor(self.image_dims[0], self.image_dims[1]))         
         self.pmask.requires_grad = True
@@ -27,8 +27,8 @@ class Mask(nn.Module):
         
     def squash_mask(self, mask):
         if len(mask.shape) == 1: # EPI mask
-            mask = mask.unsqueeze(-1)
-            mask = mask.expand(-1, self.image_dims[1])
+            mask = mask.unsqueeze(0)
+            mask = mask.expand(self.image_dims[0], -1)
         return self.sigmoid(self.pmask_slope*mask)
     
     def sparsify(self, mask):
@@ -41,8 +41,8 @@ class Mask(nn.Module):
     def threshold(self, mask):
         random_uniform = torch.empty_like(self.pmask).uniform_(0, 1).to(self.device)
         if len(random_uniform.shape) == 1: # EPI mask
-            random_uniform = random_uniform.unsqueeze(-1)
-            random_uniform = random_uniform.expand(-1, self.image_dims[1])
+            random_uniform = random_uniform.unsqueeze(0)
+            random_uniform = random_uniform.expand(self.image_dims[0], -1)
         return self.sigmoid(self.sample_slope * (mask - random_uniform))
     
     def forward(self, epoch=0, tot_epochs=0):
@@ -74,14 +74,14 @@ class CondMask(nn.Module):
         self.sigmoid = nn.Sigmoid()
         
         # MaskNet outputs a vector of probabilities corresponding to image height
-        self.fc1 = nn.Linear(1, self.image_dims[0])
+        self.fc1 = nn.Linear(1, self.image_dims[1])
         self.relu = nn.ReLU()
         self.fc_final = nn.Linear(self.image_dims[0], self.image_dims[0])
 
     def squash_mask(self, mask):
         # Takes in probability vector and outputs 2d probability mask  
-        mask = mask.unsqueeze(-1)
-        mask = mask.expand(-1, -1, self.image_dims[1])
+        mask = mask.unsqueeze(1)
+        mask = mask.expand(-1, self.image_dims[0], -1)
         return self.sigmoid(self.pmask_slope*mask)
     
     def sparsify(self, mask):
@@ -96,8 +96,8 @@ class CondMask(nn.Module):
 
     def threshold(self, mask):
         random_uniform = torch.empty(mask.shape[0], self.image_dims[0]).uniform_(0, 1).to(self.device)
-        random_uniform = random_uniform.unsqueeze(-1)
-        random_uniform = random_uniform.expand(-1, -1, self.image_dims[1])
+        random_uniform = random_uniform.unsqueeze(1)
+        random_uniform = random_uniform.expand(-1, self.image_dims[0], -1)
         return self.sigmoid(self.sample_slope * (mask - random_uniform))
     
     def forward(self, condition, get_prob_mask=False, epoch=0, tot_epochs=0):
